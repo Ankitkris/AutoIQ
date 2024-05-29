@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <title>Stlite App</title>
+</head>
+<body>
+  <script src="https://whitphx.github.io/stlite/lib/application/stlite.js" ></script>
+  <script>
+    stlite.mount({
+      mainScriptData: `
+      import streamlit as st
+      import pandas as pd
+      from pycaret.anomaly import *
+      import os
+      import scipy.cluster.hierarchy as shc
+      from sklearn.cluster import AgglomerativeClustering
+      from sklearn.manifold import TSNE
+      from pandas.plotting import radviz
+      from sklearn.cluster import KMeans
+      from sklearn.metrics import silhouette_samples
+      from sklearn.preprocessing import StandardScaler
+      from math import pi
+      import scipy.stats as stats
+      from scipy.stats import gaussian_kde
+      from ydata_profiling import ProfileReport
+      from streamlit_pandas_profiling import st_profile_report
+      import plotly.express as px
+      from pycaret.clustering import setup as clustering_setup, create_model as clustering_create_model, assign_model as clustering_assign_model, save_model as clustering_save_model, plot_model as clustering_plot_model
+      from imblearn.over_sampling import  SMOTE
+      from imblearn.under_sampling import RandomUnderSampler
+      from imblearn.combine import SMOTEENN
+      from sklearn.inspection import partial_dependence
+      from pycaret.classification import setup as classification_setup, compare_models as classification_compare_models, pull as classification_pull, save_model as classification_save_model, load_model, predict_model, plot_model, evaluate_model
+      from sklearn.model_selection import cross_val_score
+      import matplotlib.pyplot as plt
+      import seaborn as sns
+      import numpy as np
+      from sklearn.utils.class_weight import compute_class_weight
+      
+      def upload_data():
+          st.title("Upload Your Data for Modelling!")
+          file = st.file_uploader("Upload Your Dataset Here")
+          if file is not None:
+              df = pd.read_csv(file)
+              return df
+      
+      def calculate_class_weights(y):
+          class_weights = compute_class_weight(class_weight='balanced', classes=pd.unique(y), y=y)
+          return dict(zip(pd.unique(y), class_weights))
+      
+      def check_balance(df):
+          st.title("Check and Balance Dataset Imbalance")
+          target_column = st.selectbox("Select the target column", df.columns)
+      
+          # Handle missing values in the target column
+          df = df.dropna(subset=[target_column])
+      
+          imbalance_check = st.checkbox("Check dataset imbalance")
+      
+          if imbalance_check:
+              target_counts = df[target_column].value_counts()
+              st.write("Target Counts:")
+              st.write(target_counts)
+      
+              if len(target_counts) > 2:
+                  st.warning("The target has more than two classes. Automatic balancing might not be optimal.")
+      
+              imbalance_ratio = min(target_counts) / max(target_counts)
+      
+              sampler = None
+              technique_used = None
+      
+              if imbalance_ratio >= 0.8:
+                  st.success("The dataset is balanced")
+              elif 0.5 <= imbalance_ratio < 0.8:
+                  st.warning("The dataset is slightly imbalanced. Applying SMOTE.")
+                  sampler = SMOTE(sampling_strategy='auto')
+                  technique_used = "SMOTE (Synthetic Minority Over-sampling Technique)"
+              elif 0.1 <= imbalance_ratio < 0.5:
+                  st.warning("The dataset is moderately imbalanced. Applying SMOTEENN.")
+                  sampler = SMOTEENN(sampling_strategy='auto')
+                  technique_used = "SMOTE-ENN (SMOTE and Edited Nearest Neighbors)"
+              else:
+                  st.warning("The dataset is highly imbalanced. Applying Random Under-sampling.")
+                  sampler = RandomUnderSampler(sampling_strategy='auto')
+                  technique_used = "Random Under-sampling"
+      
+              if sampler:
+                  X = df.drop(columns=[target_column])
+                  y = df[target_column]
+      
+                  # Calculate class weights for better weight assignment
+                  class_weights = calculate_class_weights(y)
+      
+                  X_resampled, y_resampled = sampler.fit_resample(X, y)
+                  df_resampled = pd.concat([X_resampled, y_resampled], axis=1)
+                  st.write("Balanced Dataset:")
+                  st.dataframe(df_resampled)
+                  st.write("Sampling Technique Used: ", technique_used)
+                  st.write("Downloading Balanced Dataset...")
+                  csv_file = df_resampled.to_csv(index=False).encode()
+                  st.download_button("Download Balanced Dataset", data=csv_file, file_name="balanced_dataset.csv")
+                  return df_resampled
+      
+          return df
+      
+      def perform_eda(df):
+          st.title("Automated Exploratory Data Analysis")
+          profile_report = ProfileReport(df)
+          st_profile_report(profile_report)
+      
+      def plot_validation(estimator, X, y, param_name, param_range, save_path='validation_curve.png'):
+          from sklearn.model_selection import validation_curve
+          train_scores, test_scores = validation_curve(estimator, X, y, param_name=param_name, param_range=param_range, cv=5, n_jobs=-1)
+          train_scores_mean = np.mean(train_scores, axis=1)
+          test_scores_mean = np.mean(test_scores, axis=1)
+      
+          plt.figure(figsize=(8, 6))
+          plt.plot(param_range, train_scores_mean, label='Training score')
+          plt.plot(param_range, test_scores_mean, label='Cross-validation score')
+          plt.xlabel(param_name)
+          plt.ylabel('Score')
+          plt.title('Validation Curve')
+          plt.legend(loc='best')
+          plt.grid()
+          plt.savefig(save_path)
+          plt.close()
+      
+      def perform_classification(df):
+          st.title("Classification Modelling")
+          chosen_target = st.selectbox('Choose the Target Column', df.columns)
+          show_performance = st.checkbox('Show Performance Metrics')
+      
+          if st.button('Run Classification Modelling'):
+              # Setup PyCaret environment
+              setup(data=df, target=chosen_target)
+              classification_setup(df, target=chosen_target)
+              setup_df = classification_pull()
+              st.info("ML Experiment Settings:")
+              st.dataframe(setup_df)
+              best_model = classification_compare_models()
+              compare_df = classification_pull()
+              st.info("Best ML Model:")
+              st.dataframe(compare_df)
+              st.write(best_model)
+              save_model(best_model, 'best_classification_model')
+      
+              # Split data into features (X) and target (y)
+              X = df.drop(columns=[chosen_target])
+              y = df[chosen_target]
+      
+              # Split data into training and testing sets
+              X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+      
+              # Load the best model (replace 'best_model' with your model name)
+              best_model = load_model('best_classification_model')
+      
+              # Prediction using predict_model with raw_score=True
+              st.subheader('Prediction Results')
+              prediction_results = predict_model(best_model, data=X_test, raw_score=True)
+              st.write(prediction_results)
+      
+              # Create a folder to store plots
+              os.makedirs('classification_plots', exist_ok=True)
+              
+              from sklearn.metrics import roc_auc_score, roc_curve
+              from sklearn.metrics import confusion_matrix
+              import scikitplot as skplt
+              from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix, precision_recall_curve
+              from mlxtend.plotting import plot_decision_regions
+      
+              # Add evaluation metrics if checkbox is checked
+              if show_performance:
+                  evaluate_model(best_model)
+                  
+                  # Display AUC Curve plot
+                  st.subheader('AUC Curve')
+                  try:
+                      # Load the best model (replace 'best_model' with your model name)
+                      best_model = load_model('best_classification_model')
+                      y_probs = best_model.predict_proba(X_test)[:, 1]
+                      fpr, tpr, thresholds = roc_curve(y_test, y_probs)
+                      auc_score = roc_auc_score(y_test, y_probs)
+                      
+                      plt.plot(fpr, tpr, label=f'AUC = {auc_score:.2f}')
+                      plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Random Guess')
+                      plt.xlabel('False Positive Rate')
+                      plt.ylabel('True Positive Rate')
+                      plt.title('ROC Curve')
+                      plt.legend()
+                      plt.grid(True)
+                      
+                      # Save and display the plot
+                      auc_plot_path = 'classification_plots/AUC_Curve.png'
+                      plt.savefig(auc_plot_path)
+                      st.image(auc_plot_path)
+                  except Exception as e:
+                      st.error(f"Could not generate AUC Curve plot: {e}")
+      
+                  # Display Lift Chart
+                  st.subheader('Lift Chart')
+                  try:
+                      # Assuming 'best_model' supports probability prediction
+                      y_probs = best_model.predict_proba(X_test)
+                      skplt.metrics.plot_lift_curve(y_test, y_probs)
+                      
+                      # Save and display the plot
+                      lift_chart_path = 'classification_plots/Lift_Chart.png'
+                      plt.savefig(lift_chart_path)
+                      st.image(lift_chart_path)
+                  except Exception as e:
+                      st.error(f"Could not generate Lift Chart plot: {e}")
+                      
+                  
+                  # Display Confusion Matrix
+                  st.subheader('Confusion Matrix')
+                  try:
+                      # Load the best model (replace 'best_model' with your model name)
+                      best_model = load_model('best_classification_model')
+                      y_pred = best_model.predict(X_test)
+                      cm = confusion_matrix(y_test, y_pred)
+                      
+                      # Plot using seaborn
+                      plt.figure(figsize=(8, 6))
+                      sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False,
+                                  annot_kws={'fontsize': 12, 'fontweight': 'bold'},
+                                  xticklabels=['Predicted Negative', 'Predicted Positive'],
+                                  yticklabels=['Actual Negative', 'Actual Positive'])
+                      plt.xlabel('Predicted Label')
+                      plt.ylabel('True Label')
+                      plt.title('Confusion Matrix')
+                      plt.tight_layout()
+                      
+                      # Save and display the plot
+                      cm_plot_path = 'classification_plots/Confusion_Matrix.png'
+                      plt.savefig(cm_plot_path)
+                      st.image(cm_plot_path)
+                  except Exception as e:
+                      st.error(f"Could not generate Confusion Matrix plot: {e}")
+                  
+                  
+                  # Display Feature Importance plot
+                  st.subheader('Feature Importance')
+                  try:
+                      plot_model(best_model, plot='feature', save=True)
+                      st.image('Feature Importance.png')
+                      os.rename('Feature Importance.png', 'classification_plots/Feature_Importance.png')
+                  except Exception as e:
+                      st.error(f"Could not generate Feature Importance plot: {e}")
+                      
+                  # Display Learning Curve plot
+                  st.subheader('Learning Curve')
+                  try:
+                      plot_model(best_model, plot='learning', save=True)
+                      st.image('Learning Curve.png')
+                      os.rename('Learning Curve.png', 'classification_plots/Learning_Curve.png')
+                  except Exception as e:
+                      st.error(f"Could not generate Learning Curve plot: {e}")
+      
+                  # Display Manifold Learning plot
+                  st.subheader('Manifold Learning')
+                  try:
+                      plot_model(best_model, plot='manifold', save=True)
+                      st.image('Manifold Learning.png')
+                      os.rename('Manifold Learning.png', 'classification_plots/Manifold_Learning.png')
+                  except Exception as e:
+                      st.error(f"Could not generate Manifold Learning plot: {e}")
+                  
+                  # Validation Curve
+                  try:
+                      st.subheader('Validation Curve')
+                      # Assuming 'n_estimators' is a valid hyperparameter for the model, adjust as necessary
+                      param_name = 'n_estimators'
+                      param_range = np.linspace(10, 200, 10, dtype=int)
+                      plot_validation(best_model, X, y, param_name, param_range)
+                      st.image('validation_curve.png')
+                      os.rename('validation_curve.png', 'classification_plots/Validation_Curve.png')
+                  except Exception as e:
+                      st.error(f"An error occurred: {e}")
+                  
+      
+      def plot_validation_curve(estimator, X, y, param_name, param_range, save_path='validation_curve.png'):
+          from sklearn.model_selection import validation_curve
+          train_scores, test_scores = validation_curve(estimator, X, y, param_name=param_name, param_range=param_range, cv=5, n_jobs=-1)
+          train_scores_mean = np.mean(train_scores, axis=1)
+          test_scores_mean = np.mean(test_scores, axis=1)
+      
+          plt.figure(figsize=(8, 6))
+          plt.plot(param_range, train_scores_mean, label='Training score')
+          plt.plot(param_range, test_scores_mean, label='Cross-validation score')
+          plt.xlabel(param_name)
+          plt.ylabel('Score')
+          plt.title('Validation Curve')
+          plt.legend(loc='best')
+          plt.grid()
+          plt.savefig(save_path)
+          plt.close()
+      
+      def quantile_loss(y_true, y_pred, q):
+          residual = y_true - y_pred
+          return np.mean(np.maximum(q * residual, (q - 1) * residual))
+      
+      def plot_qq(y_true, y_pred, save_path='qq_plot.png'):
+          plt.figure(figsize=(8, 6))
+          stats.probplot(y_true - y_pred, dist="norm", plot=plt)
+          plt.title('Q-Q Plot')
+          plt.savefig(save_path)
+          plt.close()
+      
+      from pycaret.regression import setup, compare_models, pull, save_model, load_model, plot_model, evaluate_model
+      from sklearn.model_selection import train_test_split
+      
+      def perform_regression(df):
+          st.title("Regression Modelling")
+          chosen_target = st.selectbox('Choose the Target Column', df.columns)
+          show_performance = st.checkbox('Show Performance Metrics')
+      
+          if st.button('Run Regression Modelling'):
+              X = df.drop(columns=[chosen_target])
+              y = df[chosen_target]
+      
+              # Automatically detect numerical column
+              numerical_columns = df.select_dtypes(include=['number']).columns
+              if numerical_columns.empty:
+                  st.warning("No numerical columns found in the dataset.")
+              else:
+                  # Perform setup
+                  setup(data=df, target=chosen_target)
+                  setup_df = pull()
+                  st.info("ML Experiment Settings:")
+                  st.dataframe(setup_df)
+      
+                  best_model = compare_models()
+                  compare_df = pull()
+                  st.info("Best ML Model:")
+                  st.dataframe(compare_df)
+                  st.write(f'<p style="color:Black">{best_model}</p>', unsafe_allow_html=True)
+                  save_model(best_model, 'best_regression_model')
+      
+                  # Split data into training and testing sets
+                  X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+      
+                  # Load the best model
+                  best_model = load_model('best_regression_model')
+      
+                  # Create a folder to save images
+                  os.makedirs('regression_plots', exist_ok=True)
+      
+                  # Add evaluation metrics if checkbox is checked
+                  if show_performance:
+                      # Evaluate the model
+                      evaluate_model(best_model)
+      
+                      # Calculate predictions
+                      predictions = best_model.predict(X_test)
+      
+                      # Display Feature Selection plot
+                      st.subheader('Feature Selection')
+                      try:
+                          plot_model(best_model, plot='rfe', save=True)
+                          st.image('Feature Selection.png')
+                          os.rename('Feature Selection.png', 'regression_plots/Feature_Selection.png')
+                      except Exception as e:
+                          st.error(f"Could not generate Feature Selection plot: {e}")
+      
+                      # Display Cook Distance plot
+                      st.subheader('Cook Distance')
+                      try:
+                          plot_model(best_model, plot='cooks', save=True)
+                          st.image('Cooks Distance.png')
+                          os.rename('Cooks Distance.png', 'regression_plots/Cooks_Distance.png')
+                      except Exception as e:
+                          st.error(f"Could not generate Cook Distance plot: {e}")
+      
+                      # Display Feature Importance plot
+                      st.subheader('Feature Importance')
+                      try:
+                          plot_model(best_model, plot='feature', save=True)
+                          st.image('Feature Importance.png')
+                          os.rename('Feature Importance.png', 'regression_plots/Feature_Importance.png')
+                      except Exception as e:
+                          st.error(f"Could not generate Feature Importance plot: {e}")
+      
+                      # Display Learning Curve plot
+                      st.subheader('Learning Curve')
+                      try:
+                          plot_model(best_model, plot='learning', save=True)
+                          st.image('Learning Curve.png')
+                          os.rename('Learning Curve.png', 'regression_plots/Learning_Curve.png')
+                      except Exception as e:
+                          st.error(f"Could not generate Learning Curve plot: {e}")
+      
+                      # Display Manifold Learning plot
+                      st.subheader('Manifold Learning')
+                      try:
+                          plot_model(best_model, plot='manifold', save=True)
+                          st.image('Manifold Learning.png')
+                          os.rename('Manifold Learning.png', 'regression_plots/Manifold_Learning.png')
+                      except Exception as e:
+                          st.error(f"Could not generate Manifold Learning plot: {e}")
+      
+                      # Calculate quantile loss over time
+                      st.subheader('Quantile Loss Over Time')
+                      num_iterations = 5  # Number of iterations
+                      time_intervals = np.arange(1, num_iterations + 1)
+                      quantiles = np.linspace(0.1, 0.9, 5)  # Example quantiles
+                      quantile_loss_values = []
+      
+                      for q in quantiles:
+                          q_loss_values = []
+                          for i in range(1, num_iterations + 1):
+                              # Train the model on the first i iterations
+                              model = best_model.fit(X_train[:i], y_train[:i])
+      
+                              # Make predictions
+                              predictions = model.predict(X_test)
+      
+                              # Calculate quantile loss
+                              q_loss = quantile_loss(y_test, predictions, q)
+                              q_loss_values.append(q_loss)
+                          quantile_loss_values.append(q_loss_values)
+      
+                      # Plot quantile loss over time
+                      plt.figure(figsize=(8, 6))
+                      for i, q in enumerate(quantiles):
+                          plt.plot(time_intervals, quantile_loss_values[i], label=f'Quantile {q:.1f}', marker='o')
+                      plt.xlabel('Time Intervals')
+                      plt.ylabel('Quantile Loss')
+                      plt.title('Quantile Loss Over Time')
+                      plt.legend()
+                      plot_path = 'regression_plots/Quantile_Loss_Over_Time.png'
+                      plt.savefig(plot_path)
+                      st.pyplot(plt.gcf())
+      
+                      # Prediction interval plot
+                      st.subheader('Prediction Interval Plot')
+                      if hasattr(best_model, 'predict'):
+                          plt.figure(figsize=(8, 6))
+                          # Calculate prediction intervals
+                          y_pred = best_model.predict(X_test)
+                          prediction_interval = 1.96 * np.std(y_test - y_pred)
+                          # Plot prediction intervals
+                          plt.errorbar(np.arange(len(y_test)), y_pred, yerr=prediction_interval, fmt='o', color='b',
+                                       ecolor='lightgray', elinewidth=3, capsize=0)
+                          plt.xlabel('Sample Index')
+                          plt.ylabel('Predicted Values')
+                          plt.title('Prediction Interval Plot')
+                          st.pyplot(plt.gcf())
+                          plot_path = 'regression_plots/Prediction_Interval_Plot.png'
+                          plt.savefig(plot_path)
+                      else:
+                          st.warning("Prediction interval plot cannot be generated. The model may not support prediction.")
+      
+                      # Validation Curve
+                      try:
+                          st.subheader('Validation Curve')
+                          # Assuming 'n_estimators' is a valid hyperparameter for the model, adjust as necessary
+                          param_name = 'n_estimators'
+                          param_range = np.linspace(10, 200, 10, dtype=int)
+                          plot_validation_curve(best_model, X, y, param_name, param_range)
+                          st.image('validation_curve.png')
+                          os.rename('validation_curve.png', 'regression_plots/Validation_Curve.png')
+                      except Exception as e:
+                          st.error(f"An error occurred: {e}")
+      
+                      # Cross Validation Curve
+                      st.subheader('Cross-validation Curve')
+                      try:
+                          if hasattr(best_model, 'fit'):
+                              plt.figure(figsize=(8, 6))
+                              cv_scores = cross_val_score(best_model, X, y, cv=5, scoring='neg_mean_squared_error')
+                              plt.plot(np.arange(1, 6), -cv_scores)
+                              plt.title('Cross-Validation Curve')
+                              plt.xlabel('Number of Folds')
+                              plt.ylabel('Negative Mean Squared Error')
+                              cv_curve_filename = 'regression_plots/Cross_Validation_Curve.png'
+                              plt.savefig(cv_curve_filename)  # Save the cross-validation curve plot
+                              st.image(cv_curve_filename)
+                          else:
+                              st.warning(
+                                  "Cross-validation curve cannot be generated. The model may not support cross-validation.")
+                      except Exception as e:
+                          st.error(f"An error occurred while generating the cross-validation curve: {e}")
+      
+                      # Interactive residual plot using Plotly
+                      st.subheader('Interactive Residual Plot')
+                      residual_fig = plt.figure(figsize=(8, 6))
+                      residuals = y_test - predictions
+                      plt.scatter(predictions, residuals, color='black')
+                      plt.xlabel('Predicted Values')
+                      plt.ylabel('Residuals')
+                      plt.title('Residual Plot')
+                      residual_plot_filename = 'regression_plots/Residual_Plot.png'
+                      plt.savefig(residual_plot_filename)  # Save the residual plot
+                      st.image(residual_plot_filename)
+      
+                      # Residuals vs. Features Plot
+                      st.subheader('Residuals vs Features Plot')
+                      if hasattr(best_model, 'predict'):
+                          plt.figure(figsize=(10, 6))
+                          residuals = y_test - best_model.predict(X_test)
+                          for i in range(X_test.shape[1]):
+                              plt.scatter(X_test.iloc[:, i], residuals, alpha=0.5)
+                              plt.xlabel(X.columns[i])
+                              plt.ylabel('Residuals')
+                              plt.title('Residuals vs. Features Plot')
+                              plt.grid(True)
+                          st.pyplot(plt.gcf())
+                          plot_path = 'regression_plots/Residuals_vs_Features.png'
+                          plt.savefig(plot_path)
+                      else:
+                          st.warning("Residuals vs. Features plot cannot be generated. The model may not support prediction.")
+      
+                      # Calculate bias over time (example)
+                      st.subheader('Line plot of Bias Over Time')
+                      num_iterations = 5  # Example number of iterations
+                      time_intervals = np.arange(1, num_iterations + 1)
+                      bias_values = []
+      
+                      for i in range(1, num_iterations + 1):
+                          # Train the model on the first i iterations
+                          model = best_model.fit(X_train[:i], y_train[:i])
+      
+                          # Make predictions
+                          predictions = model.predict(X_test)
+      
+                          # Calculate bias (example: mean absolute error)
+                          bias = np.mean(np.abs(predictions - y_test))
+                          bias_values.append(bias)
+      
+                      # Plot bias over time
+                      plt.figure(figsize=(8, 6))
+                      plt.plot(time_intervals, bias_values, marker='o')
+                      plt.xlabel('Time Intervals')
+                      plt.ylabel('Bias')
+                      plt.title('Bias Over Time')
+                      plt.savefig('regression_plots/Bias_Over_Time.png')
+                      st.pyplot(plt.gcf())
+      
+                      # Add Q-Q plot
+                      st.subheader('Q-Q Plot')
+                      plot_qq(y_test, y_pred)
+                      st.image('qq_plot.png')
+                      os.rename('qq_plot.png', 'regression_plots/QQ_Plot.png')
+      
+                      # Prediction error plot using Plotly
+                      st.subheader('Prediction Error Plot')
+                      prediction_error_fig = plt.figure(figsize=(8, 6))
+                      plt.scatter(y_test, predictions, color='blue')
+                      plt.xlabel('Actual Values')
+                      plt.ylabel('Predicted Values')
+                      plt.title('Prediction Error Plot')
+                      prediction_error_filename = 'regression_plots/Prediction_Error_Plot.png'
+                      plt.savefig(prediction_error_filename)  # Save the prediction error plot
+                      st.image(prediction_error_filename)
+      
+                      # Scatter plot of actual vs. predicted values with a diagonal line representing perfect predictions
+                      st.subheader('Actual vs. Predicted Values')
+                      plt.figure(figsize=(8, 6))
+                      plt.scatter(y_test, predictions, alpha=0.5)
+                      plt.plot([min(y_test), max(y_test)], [min(y_test), max(y_test)], '--', color='red')
+                      plt.xlabel('Actual Values')
+                      plt.ylabel('Predicted Values')
+                      plt.title('Actual vs. Predicted Values')
+                      plt.savefig('regression_plots/Actual_vs_Predicted.png')
+                      st.pyplot(plt.gcf())
+      
+                      # Add Partial Dependence Plot (PDP)
+                      st.subheader('Partial Dependence Plot (PDP)')
+                      try:
+                          features = [0, 1]  # Specify the features for which you want to plot the PDP
+                          pdp, axes = partial_dependence(best_model, X_train, features=features, grid_resolution=50)
+                          for i, feature in enumerate(features):
+                              plt.figure()
+                              plt.plot(axes[i], pdp[i], '-')
+                              plt.title(f'Partial dependence plot for feature {feature}')
+                              plt.xlabel('Feature values')
+                              plt.ylabel('Partial dependence')
+                              plt.grid(True)
+                              st.pyplot(plt.gcf())
+                              plt.savefig(f'regression_plots/PDP_Feature_{feature}.png')
+                      except Exception as e:
+                          st.warning("Partial Dependence Plot (PDP) cannot be generated for this model.")
+      
+                      # Coefficient plot
+                      st.subheader('Coefficient Plot')
+                      if hasattr(best_model, 'coef_'):
+                          plt.figure(figsize=(8, 6))
+                          sns.barplot(x=X.columns, y=best_model.coef_)
+                          plt.title('Coefficient Plot')
+                          plt.xlabel('Features')
+                          plt.ylabel('Coefficients')
+                          plt.xticks(rotation=45)
+                          st.pyplot(plt.gcf())
+                          plot_path = 'regression_plots/Coefficient_Plot.png'
+                          plt.savefig(plot_path)
+                      else:
+                          st.warning("Coefficient plot cannot be generated. The model may not have coefficients available.")
+      
+      def clustering_plot_radviz(df, model):
+          if hasattr(model, 'labels_'):
+              # Add cluster labels to dataframe
+              df['Cluster'] = model.labels_
+      
+              # Plot RadViz
+              plt.figure(figsize=(10, 7))
+              radviz(df, 'Cluster', colormap='viridis')
+              plt.title("RadViz Plot")
+              st.pyplot(plt)
+          else:
+              st.warning("RadViz plot is not supported for this clustering algorithm.")
+      
+      def clustering_plot_dendrogram(model):
+          if isinstance(model, AgglomerativeClustering):
+              plt.figure(figsize=(10, 7))
+              plt.title("Dendrogram")
+              dend = shc.dendrogram(shc.linkage(model.children_, method='ward'))
+              st.pyplot(plt)
+          else:
+              st.warning("Dendrogram plot is supported for hierarchical clustering algorithms only.")
+      
+      
+      def clustering_plot_heatmap(df, model):
+          if hasattr(model, 'labels_'):
+              # Calculate pairwise distances/similarities
+              if hasattr(model, 'affinity_matrix_'):
+                  pairwise_distances = model.affinity_matrix_
+              else:
+                  pairwise_distances = model.fit_transform(df)
+      
+              # Plot heatmap
+              plt.figure(figsize=(10, 7))
+              sns.heatmap(pairwise_distances, cmap='viridis', annot=False)
+              plt.title("Pairwise Distances/Similarities Heatmap")
+              plt.xlabel("Data Points")
+              plt.ylabel("Data Points")
+              st.pyplot(plt)
+          else:
+              st.warning("Heatmap plot is not supported for this clustering algorithm.")
+      
+      def clustering_plot_tsne(df, model):
+          if hasattr(model, 'labels_'):
+              # Reduce dimensionality with t-SNE
+              tsne = TSNE(n_components=2, random_state=42)
+              tsne_results = tsne.fit_transform(df)
+      
+              # Plot t-SNE
+              plt.figure(figsize=(10, 7))
+              sns.scatterplot(x=tsne_results[:,0], y=tsne_results[:,1], hue=model.labels_, palette='viridis')
+              plt.title("t-SNE Plot")
+              plt.xlabel("t-SNE Component 1")
+              plt.ylabel("t-SNE Component 2")
+              st.pyplot(plt)
+          else:
+              st.warning("t-SNE plot is not supported for this clustering algorithm.")
+      
+      
+      def clustering_plot_radial(df, model):
+          if isinstance(model, KMeans) and hasattr(model, 'cluster_centers_'):
+              # Scale the data
+              scaler = StandardScaler()
+              scaled_df = scaler.fit_transform(df)
+      
+              # Get cluster centers if the number of features match
+              if scaled_df.shape[1] == model.cluster_centers_.shape[1]:
+                  cluster_centers = scaler.inverse_transform(model.cluster_centers_)
+      
+                  # Define attributes for the radar plot
+                  attributes = list(df.columns)
+                  num_attributes = len(attributes)
+      
+                  # Create a radar plot for each cluster
+                  for cluster_label, center in enumerate(cluster_centers):
+                      # Reshape center array if needed
+                      center = center.reshape(1, -1)
+                      values = center.tolist()[0]  # Convert to list
+                      values += values[:1]  # Closing the loop
+                      angles = [n / float(num_attributes) * 2 * pi for n in range(num_attributes)]
+                      angles += angles[:1]  # Closing the loop
+      
+                      # Plot
+                      plt.figure(figsize=(8, 8))
+                      ax = plt.subplot(111, polar=True)
+                      plt.title(f"Cluster {cluster_label + 1}", size=20, color='black')
+                      ax.set_theta_offset(pi / 2)
+                      ax.set_theta_direction(-1)
+      
+                      # Draw one axe per variable and add labels
+                      plt.xticks(angles[:-1], attributes, color='grey', size=12)
+      
+                      # Plot data
+                      ax.plot(angles, values, linewidth=1, linestyle='solid')
+      
+                      # Fill area
+                      ax.fill(angles, values, 'b', alpha=0.1)
+      
+                      plt.show()
+              else:
+                  st.warning("Number of features in the dataset does not match the model.")
+          else:
+              st.warning("Radial plot is not supported for this clustering algorithm.")
+      
+      def perform_clustering(df):
+          st.title("Clustering")
+          clustering_algorithm = st.selectbox('Select Clustering Algorithm', ['KMeans', 'AgglomerativeClustering',
+                                                                              'DBSCAN', 'Mean Shift',
+                                                                              'Spectral Clustering', 'Affinity Propagation',
+                                                                              'OPTICS',
+                                                                              'BIRCH'])  # Removed unsupported algorithms
+      
+          num_clusters_input_needed = clustering_algorithm in ['KMeans', 'AgglomerativeClustering', 'Spectral Clustering',
+                                                               'BIRCH']
+      
+          num_clusters = None
+          if num_clusters_input_needed:
+              num_clusters = st.number_input('Enter the number of clusters', min_value=2, max_value=10, value=2)
+      
+          run_clustering = st.button('Run Clustering')
+          show_plot = st.checkbox('Show Plot')
+      
+          if run_clustering:
+              clustering_setup(df)
+      
+              if clustering_algorithm == 'KMeans':
+                  best_model = clustering_create_model('kmeans', num_clusters)
+              elif clustering_algorithm == 'AgglomerativeClustering':
+                  best_model = clustering_create_model('hclust', num_clusters=num_clusters)
+              elif clustering_algorithm == 'DBSCAN':
+                  best_model = clustering_create_model('dbscan')
+              elif clustering_algorithm == 'Mean Shift':
+                  best_model = clustering_create_model('meanshift')
+              elif clustering_algorithm == 'Spectral Clustering':
+                  best_model = clustering_create_model('spectral', num_clusters=num_clusters)
+              elif clustering_algorithm == 'Affinity Propagation':
+                  best_model = clustering_create_model('ap')
+              elif clustering_algorithm == 'OPTICS':
+                  best_model = clustering_create_model('optics')
+              elif clustering_algorithm == 'BIRCH':
+                  best_model = clustering_create_model('birch', num_clusters=num_clusters)
+      
+              assigned_df = clustering_assign_model(best_model)
+              st.info("Cluster Assignments:")
+              st.dataframe(assigned_df)
+              clustering_save_model(best_model, f'best_clustering_model')  # Save clustering model with .pkl extension
+      
+              # Show clustering plot if checkbox is checked
+              if show_plot:
+                  clustering_plot_model(best_model, plot='cluster', save=False)
+      
+                  st.subheader('heatmap plot')
+                  clustering_plot_heatmap(df, best_model)
+      
+                  st.subheader('T-SNE plot')
+                  clustering_plot_tsne(df, best_model)
+      
+                  st.subheader('RadViz plot')
+                  clustering_plot_radviz(df, best_model)
+      
+                  st.subheader('Radial plot')
+                  clustering_plot_radial(df, best_model)
+      
+                  # Cluster Size Distribution
+                  st.subheader('Cluster Size Distribution')
+                  plt.figure(figsize=(8, 6))
+                  assigned_df['Cluster'].value_counts().sort_index().plot(kind='bar')
+                  plt.title('Cluster Size Distribution')
+                  plt.xlabel('Cluster')
+                  plt.ylabel('Count')
+                  st.pyplot(plt)
+      
+                  # Distance Plot (Example: KMeans centroids or DBSCAN distance matrix)
+                  if clustering_algorithm == 'KMeans':
+                      st.subheader('Centroid Distance Heatmap')
+                      centroids = best_model.cluster_centers_
+                      plt.figure(figsize=(8, 6))
+                      sns.heatmap(centroids, annot=True, fmt=".2f", cmap="YlGnBu", linewidths=0.5)
+                      plt.title('Centroid Distance Heatmap')
+      
+                      st.pyplot(plt)
+                  else:
+                      st.warning("Centroid Distance Heatmap for only K-Means possible.")
+      
+                  # Silhouette Plot
+                  st.subheader('Silhouette Plot')
+                  if len(df.columns) > 1:
+                      silhouette_vals = silhouette_samples(df, assigned_df['Cluster'])
+                      assigned_df['Silhouette'] = silhouette_vals
+                      fig = px.scatter(assigned_df, x=df.columns[0], y=df.columns[1], color='Cluster',
+                                       title='Silhouette Plot')
+                      fig.update_traces(marker=dict(size=8))  # Set a constant marker size
+                      st.plotly_chart(fig)
+      
+                  # Elbow Plot (for KMeans)
+                  st.subheader('Elbow Plot')
+                  if clustering_algorithm == 'KMeans':
+                      wcss = []
+                      for i in range(1, 11):
+                          kmeans = KMeans(n_clusters=i, init='k-means++', max_iter=300, n_init=10, random_state=0)
+                          kmeans.fit(df)
+                          wcss.append(kmeans.inertia_)
+                      plt.figure(figsize=(10, 6))
+                      plt.plot(range(1, 11), wcss)
+                      plt.title('Elbow Method')
+                      plt.xlabel('Number of clusters')
+                      plt.ylabel('WCSS')
+                      st.pyplot(plt)
+      
+                  # Cluster Density Plot
+                  st.subheader('Cluster Density Plot')
+                  plt.figure(figsize=(10, 6))
+                  for cluster_label in assigned_df['Cluster'].unique():
+                      cluster_data = df[assigned_df['Cluster'] == cluster_label]
+                      kde = gaussian_kde(cluster_data[df.columns[0]])
+                      x_vals = np.linspace(min(cluster_data[df.columns[0]]), max(cluster_data[df.columns[0]]), 1000)
+                      plt.plot(x_vals, kde(x_vals), label=f'Cluster {cluster_label} Density')
+                  plt.title('Cluster Density Plot')
+                  plt.xlabel(df.columns[0])
+                  plt.ylabel('Density')
+                  plt.legend()
+                  st.pyplot(plt)
+      
+                  # Cluster Comparison Plot
+                  st.subheader('Cluster Comparison Plot')
+                  if len(df.columns) > 1:
+                      fig = px.scatter_matrix(df.assign(Cluster=assigned_df['Cluster']), dimensions=df.columns,
+                                              color='Cluster')
+                      fig.update_layout(title='Cluster Comparison Plot')
+                      st.plotly_chart(fig)
+                  else:
+                      st.warning(
+                          "Cluster comparison plot visualization is supported for datasets with more than one feature.")
+      
+                  # Cluster Centroid Plot
+                  st.subheader('Cluster Centroid Plot')
+                  if len(df.columns) == 2:  # Assuming only 2 features for simplicity
+                      kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(df)
+                      centroids = kmeans.cluster_centers_
+                      plt.figure(figsize=(10, 6))
+                      sns.scatterplot(data=df, x=df.columns[0], y=df.columns[1], hue=assigned_df['Cluster'])
+                      plt.scatter(centroids[:, 0], centroids[:, 1], marker='x', color='black', s=100, label='Centroids')
+                      plt.title('Cluster Centroid Plot')
+                      plt.xlabel(df.columns[0])
+                      plt.ylabel(df.columns[1])
+                      plt.legend()
+                      st.pyplot(plt)
+                  else:
+                      st.warning("Cluster centroid plot visualization is supported for datasets with only two features.")
+      
+                  # Scatter Plot
+                  st.subheader('Scatter Plot with Clusters')
+      
+                  # Check if there are at least two features for plotting
+                  if len(df.columns) >= 2:
+                      plt.figure(figsize=(8, 6))
+      
+                      # Plot each cluster separately
+                      clusters = assigned_df['Cluster'].unique()
+                      colors = sns.color_palette('viridis', len(clusters))  # Generate colors for each cluster
+                      for i, cluster_label in enumerate(clusters):
+                          cluster_data = df[assigned_df['Cluster'] == cluster_label]
+                          sns.scatterplot(x=df.columns[0], y=df.columns[1], data=cluster_data,
+                                          label=f'Cluster {cluster_label}',
+                                          color=colors[i], edgecolor='k', s=100, alpha=0.8)
+      
+                      plt.title('Scatter Plot with Clusters')
+                      plt.xlabel(df.columns[0])
+                      plt.ylabel(df.columns[1])
+                      plt.legend()
+                      st.pyplot(plt)
+                  else:
+                      st.warning("Scatter plot visualization requires at least two features.")
+      
+                  st.subheader('Dendrogram')
+                  clustering_plot_dendrogram(best_model)
+      
+      def download_models():
+          st.title("Download Models")
+          download_choice = st.radio("Download Model", ["Classification Model", "Regression Model", "Clustering Model"])
+          if download_choice == "Classification Model":
+              with open('best_classification_model.pkl', 'rb') as f:
+                  st.download_button('Download Classification Model', f, file_name="trained_classification_model.pkl")
+          elif download_choice == "Regression Model":
+              with open('best_regression_model.pkl', 'rb') as f:
+                  st.download_button('Download Regression Model', f, file_name="trained_regression_model.pkl")
+          elif download_choice == "Clustering Model":
+              with open('best_clustering_model.pkl', 'rb') as f:  # Open the clustering model file for download
+                  st.download_button('Download Clustering Model', f, file_name="trained_clustering_model.pkl")
+      
+      def learn_more_section():
+          st.title("Learn More")
+          st.write("Welcome to SparklingStream, an enchanting fusion of data exploration and automated model building! SparklingStream is your gateway to effortlessly delve into the World of machine learning.")
+          st.write("Embark on a journey of discovery as you upload your dataset and watch as SparklingStream weaves its magic, unraveling the intricacies of your data through automated exploratory data analysis. Marvel at the insights revealed as SparklingStream paints a vivid portrait of your dataset, illuminating hidden patterns and quirks with unparalleled elegance.")
+          st.write("But the enchantment doesn't end there. With SparklingStream, you can harness the power of automated machine learning to conjure classification, regression, or clustering models with a mere wave of your wand. Bid farewell to the complexities of manual model building and let SparklingStream guide you towards optimal model selection, hyperparameter tuning, and performance evaluation.")
+          st.write("So, whether you're a novice seeking to unveil the secrets hidden within your data or a seasoned data explorer looking to streamline your machine learning workflow, SparklingStream invites you to join the enchantment. Let the magic of automated machine learning ignite your imagination and elevate your data-driven adventures to dazzling new heights.")
+          st.write("Experience the wonder of SparklingStream today and unlock the mysteries of your data with effortless grace and charm. After all, in the realm of machine learning, every dataset deserves to sparkle.")
+          st.write("Made with ❤️ by Ankit Krishna.")
+      
+      
+      def main():
+          st.sidebar.image("https://www.onepointltd.com/wp-content/uploads/2020/03/inno2.png")
+          st.sidebar.title("AutoML Navigator")
+      
+          choice = st.sidebar.radio("Navigation", ["Upload", "Check Balance", "Profiling", "Classification Modelling",
+                                                   "Regression Modelling", "Clustering Modelling",
+                                                   "Download", "Learn More"])
+      
+          if os.path.exists("sourcedata.csv"):
+              df = pd.read_csv("sourcedata.csv")
+          else:
+              df = None
+      
+          if choice == "Upload":
+              df = upload_data()
+              if df is not None:
+                  df.to_csv("sourcedata.csv", index=False)
+                  st.dataframe(df)
+      
+          elif choice == "Check Balance" and df is not None:
+              df = check_balance(df)
+      
+          elif choice == "Profiling" and df is not None:
+              perform_eda(df)
+      
+          elif choice == "Classification Modelling" and df is not None:
+              perform_classification(df)
+      
+          elif choice == "Regression Modelling" and df is not None:
+              perform_regression(df)
+      
+          elif choice == "Clustering Modelling" and df is not None:
+              perform_clustering(df)
+      
+          elif choice == "Download":
+              download_models()
+      
+          elif choice == "Learn More":
+              learn_more_section()
+      
+      if __name__ == "__main__":
+          main()
+`
+    })
+  </script>
+</body>
+ 
+
+</html>
